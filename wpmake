@@ -7,10 +7,6 @@ if (php_sapi_name() !== 'cli') {
     exit;
 }
 
-# https://wordpress.org/latest.zip
-# https://wordpress.org/wordpress-5.2.zip
-# https://downloads.wordpress.org/plugin/woocommerce.4.0.0.zip
-
 system('clear');
 
 print "\n";
@@ -27,7 +23,7 @@ $default_folder = uniqid('wp_');
 $default_config = '{
     "url": "http://localhost/'.$default_folder.'",
     "path": "/web/'.$default_folder.'",
-    "wp_version": "latest",
+    "wp_version": "5.3.2",
     "wp_debug": true,
     "db_name": "'.$default_folder.'",
     "db_user": "root",
@@ -384,8 +380,13 @@ class WPMake {
         file_put_contents( $this->config->path . '/wp-config.php', $content );
     }
 
+    /**
+     * Create database
+     *
+     * @return void
+     */
     function create_database(){
-        
+        $this->db->query("CREATE DATABASE {$this->config->db_name} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
     }
 
     /**

@@ -1,0 +1,11 @@
+{
+    "url": "http://localhost/wp_5e75d8a8539f5",
+    "path": "/web/wp_5e75d8a8539f5",
+    "wp_version": "5.3.2",
+    "wp_debug": true,
+    "db_name": "wp_5e75d8a8539f5",
+    "db_user": "root",
+    "db_pass": "root",
+    "db_host": "localhost",
+    "plugins": {}
+}
