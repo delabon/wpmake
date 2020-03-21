@@ -1,0 +1,449 @@
+#!/usr/bin/php
+<?php
+
+ini_set('max_execution_time', 0);
+
+if (php_sapi_name() !== 'cli') {
+    exit;
+}
+
+# https://wordpress.org/latest.zip
+# https://wordpress.org/wordpress-5.2.zip
+# https://downloads.wordpress.org/plugin/woocommerce.4.0.0.zip
+
+system('clear');
+
+print "\n";
+print "#####################################################################\n";
+print "# WPMake - Help building your Wordpress testing environments\n";
+print "# \n";
+print "# ./wpmake config - creates a config file\n";
+print "# ./wpmake build  - start building the website\n";
+print "#\n";
+print "#####################################################################\n";
+print "\n";
+
+$default_folder = uniqid('wp_');
+$default_config = '{
+    "url": "http://localhost/'.$default_folder.'",
+    "path": "/web/'.$default_folder.'",
+    "wp_version": "latest",
+    "wp_debug": true,
+    "db_name": "'.$default_folder.'",
+    "db_user": "root",
+    "db_pass": "root",
+    "db_host": "localhost",
+    "plugins": {}
+}';
+
+class WPMake {
+
+    const WP_DOWNLOAD_URL = 'https://wordpress.org/';
+    const PLUGIN_DOWNLOAD_URL = 'https://downloads.wordpress.org/plugin/';
+    const API_PLUGIN_ENDPOINT = 'https://api.wordpress.org/plugins/info/1.0/{slug}.json';
+    const TEMP_FOLDER = __DIR__ . '/.wpmake_files';
+
+    private $db;
+    private $config;
+    private $plugins = [];
+    private $wp_zip_url = '';
+
+    /**
+     * Constructor
+     *
+     * @param array $commands
+     * @param string $default_config
+     */
+    function __construct( array $commands, string $default_config ){
+
+        if( ! is_writable( __DIR__ ) ){
+            print "\n[error] Folder is not writable: " . __DIR__ . "\n";
+            die;
+        }
+
+        $this->check_extensions();
+        $this->setup();
+
+        if( isset( $commands[1] ) && strtolower( $commands[1] ) === 'config' ){
+            $this->create_config( $default_config );
+        }
+        elseif( isset( $commands[1] ) && strtolower( $commands[1] ) === 'build' ){
+            $this->build();
+        }
+    }
+
+    /**
+     * Bail if the required extensions are missing
+     * 
+     * @return void
+     */
+    function check_extensions(){
+
+        $extensions = get_loaded_extensions();
+
+        if( ! in_array( 'curl', $extensions ) ){
+            print "\n[error] curl extension required.\n";
+            die;
+        }
+
+        if( ! in_array( 'zip', $extensions ) ){
+            print "\n[error] zip extension required.\n";
+            die;
+        }
+
+        if( ! in_array( 'mysqli', $extensions ) ){
+            print "\n[error] mysqli extension required.\n";
+            die;
+        }
+
+        if( ! in_array( 'json', $extensions ) ){
+            print "\n[error] json extension required.\n";
+            die;
+        }
+
+        if( ! in_array( 'PDO', $extensions ) ){
+            print "\n[error] PDO extension required.\n";
+            die;
+        }
+
+        if( ! in_array( 'pdo_mysql', $extensions ) ){
+            print "\n[error] pdo_mysql extension required.\n";
+            die;
+        }
+    }
+
+    /**
+     * Setup folders
+     *
+     * @return void
+     */
+    function setup(){
+
+        if( file_exists( self::TEMP_FOLDER ) ) return;
+
+        mkdir( self::TEMP_FOLDER );
+    }
+
+    /**
+     * Create json config file
+     *
+     * @param string $default_config
+     * @return void
+     */
+    function create_config( string $default_config ){
+
+        $path = __DIR__ . '/config.json';
+
+        if( file_exists($path) ){
+            print "[error] config.json already created!\n";
+            $answer = readline("Would you like to start from scratch? yes/no (default=no): ");
+
+            if( strtolower( $answer ) !== "yes" ){
+                print "\nUse command './wpmake' to start building your site.\n";
+                die;
+            }
+        }
+
+        file_put_contents( __DIR__ . '/config.json', $default_config );
+
+        print "\n[success] Config file has been created: " . __DIR__ . "/config.json\n";
+    }
+
+    /**
+     * Start building
+     */
+    function build(){
+
+        $config_path = __DIR__ . '/config.json';
+
+        # bail if config file does not exist
+        if( ! file_exists( $config_path ) ){
+            print "\n[error] Config file does not exist!\n";
+            print "\nUse command './wpmake config' to generate a default config file.\n";
+            die;
+        }
+
+        $content = file_get_contents( $config_path );
+        $this->config = json_decode( $content );
+
+        # bail if folder exists
+        if( file_exists( $this->config->path ) ){
+            print "\n[error] {$this->config->path} already exists!\n";
+            die;
+        }
+
+        $this->init_db();
+        $this->is_database_exists();
+        $this->prepare_wp_zip_url();
+        $this->prepare_plugins_urls();
+
+        $this->download_wp();
+        $this->create_database();
+        //$this->download_plugins();
+    }
+
+    /**
+     * Init database
+     *
+     * @return void
+     */
+    function init_db(){
+
+        // connect to the MySQL server
+        $this->db = new mysqli( 
+            $this->config->db_host, 
+            $this->config->db_user, 
+            $this->config->db_pass 
+        );
+        
+        // check connection
+        if( mysqli_connect_errno() ){
+            print "\n[error] Invalid MySql credentials.\n";
+            die;
+        }        
+    }
+
+    /**
+     * Check if database exists
+     *
+     * @return void
+     */
+    function is_database_exists(){
+        
+        $sql = "SHOW DATABASES LIKE '{$this->config->db_name}'";
+        $result = $this->db->query($sql);
+
+        if( $result->num_rows != 0 ){
+            print "\n[error] Database '{$this->config->db_name}' already exists!\n";
+            die;
+        }
+    }
+
+    /**
+     * Prepare wordpress zip url
+     *
+     * @return void
+     */
+    function prepare_wp_zip_url(){
+
+        if( preg_match( '/[0-9]{1,2}\.[0-9]{1,2}\.0/', $this->config->wp_version ) ){
+            $this->config->wp_version = substr( $this->config->wp_version, 0, strlen( $this->config->wp_version ) - 2 );
+        }
+
+        $this->wp_zip_url = self::WP_DOWNLOAD_URL . 'wordpress-'.$this->config->wp_version.'.zip';
+
+        if( ! $this->is_url_exists( $this->wp_zip_url ) ){
+            print "\n[error] Wordpress '{$this->config->wp_version}' does not exist!\n";
+            die;
+        }
+    }
+
+    /**
+     * Prepare plugins zip urls
+     *
+     * @return void
+     */
+    function prepare_plugins_urls(){
+
+        foreach( (array)$this->config->plugins as $plugin => $version ){
+
+            $content = file_get_contents( str_replace( '{slug}', $plugin, self::API_PLUGIN_ENDPOINT ) );
+
+            if( ! $content ){
+                print "\n[error] Plugin not found: {$plugin} {$version}\n";
+                die;
+            }
+            
+            $json = json_decode( $content, true );
+        
+            if( isset( $json['error'] ) ){
+                print "\n[error] Plugin not found: {$plugin} {$version}\n";
+                die;
+            }
+
+            if( in_array( strtolower($version), ['latest', 'trunk'] ) ){                
+                $plugin_url = end( $json['versions'] );
+            }
+            elseif( ! isset( $json['versions'][ $version ] ) ){
+                $plugin_url = end( $json['versions'] );
+            }
+            else{
+                $plugin_url = $json['versions'][ $version ];
+            }
+
+            $this->plugins[$plugin] = [
+                'slug' => $plugin,
+                'version' => $version,
+                'url' => $plugin_url,
+            ];
+
+            sleep(2);
+        }
+    }
+
+    /**
+     * Download the wp zip file
+     *
+     * @return void
+     */
+    function download_wp(){
+
+        $zip_file = self::TEMP_FOLDER . "/wordpress-{$this->config->wp_version}.zip";
+
+        if( ! file_exists( $zip_file ) ){
+            $this->download_zip( $this->wp_zip_url, $zip_file );
+        }
+
+        $this->extract_zip( $zip_file, $this->config->path );
+        $this->prepare_wp_config_file();
+    }
+
+    /**
+     * Download zip file
+     *
+     * @param string $url
+     * @param string $path
+     * @return void
+     */
+    function download_zip( string $url, string $path ){
+
+        print "\n[downloading] " . $url . "\n";
+
+        $zip_resource = fopen( $path, "w");
+        
+        $ch_start = curl_init();
+
+        curl_setopt($ch_start, CURLOPT_URL, $url);
+        curl_setopt($ch_start, CURLOPT_FAILONERROR, true);
+        curl_setopt($ch_start, CURLOPT_HEADER, 0);
+        curl_setopt($ch_start, CURLOPT_FOLLOWLOCATION, true);
+        curl_setopt($ch_start, CURLOPT_AUTOREFERER, true);
+        curl_setopt($ch_start, CURLOPT_BINARYTRANSFER,true);
+        curl_setopt($ch_start, CURLOPT_CONNECTTIMEOUT, 0);
+        curl_setopt($ch_start, CURLOPT_TIMEOUT, 1000); // 16 minutes
+        curl_setopt($ch_start, CURLOPT_SSL_VERIFYHOST, 0);
+        curl_setopt($ch_start, CURLOPT_SSL_VERIFYPEER, 0);
+        curl_setopt($ch_start, CURLOPT_FILE, $zip_resource);
+
+        $page = curl_exec($ch_start);
+
+        if( ! $page ){
+            print "\n[error] " . curl_error($ch_start) . "\n";
+            die;
+        }
+
+        curl_close($ch_start);
+    }
+
+    /**
+     * Extract zip file to a folder
+     *
+     * @param string $zip_file
+     * @param string $path
+     * @return void
+     */
+    function extract_zip( string $zip_file, string $path ){
+
+        print "\n[extracting] " . $zip_file . " > " . $path . "\n";
+
+        $source = '/tmp/wpmake_wp';
+        $zip = new ZipArchive;
+
+        if( $zip->open($zip_file) !== true ){
+            echo "\n[error] :- Unable to open the Zip File: {$zip_file}\n";
+            $zip->close();
+            die;
+        } 
+        
+        $zip->extractTo($source);
+        $zip->close();
+
+        // move wordpress to path
+        mkdir( $path );
+        rename( $source . '/wordpress', $path );
+
+        // remove empty folder /tmp/wpmake_wp
+        rmdir( $source );
+    }
+
+    /**
+     * Prepare wp-config.php file
+     *
+     * @return void
+     */
+    function prepare_wp_config_file(){
+
+        $content = file_get_contents( $this->config->path . '/wp-config-sample.php' );
+
+        $content = str_replace('database_name_here', $this->config->db_name, $content);
+        $content = str_replace('username_here', $this->config->db_user, $content);
+        $content = str_replace('password_here', $this->config->db_pass, $content);
+        $content = str_replace("DB_HOST', 'localhost", "DB_HOST', '" . $this->config->db_host, $content);
+        $content = str_replace("WP_DEBUG', false", "WP_DEBUG', " . ( $this->config->wp_debug ? 'true' : 'false' ), $content);
+
+        file_put_contents( $this->config->path . '/wp-config.php', $content );
+    }
+
+    function create_database(){
+        
+    }
+
+    /**
+    * Send an HTTP request to a the $url and check the header posted back.
+    *
+    * @param $url String url to which we must send the request.
+    * @param $failCodeList Int array list of code for which the page is considered invalid.
+    *
+    * @return Boolean
+    */
+    function is_url_exists( $url, array $failCodeList = [404] ){
+
+        if( empty( $failCodeList ) ){
+            $failCodeList = [404]; 
+        }
+
+        $exists = false;
+
+        if( ! filter_var( $url, FILTER_VALIDATE_URL ) ){
+            return false;
+        }
+
+        $handle = curl_init($url);
+
+        curl_setopt($handle, CURLOPT_RETURNTRANSFER, true);
+
+        curl_setopt($handle, CURLOPT_SSL_VERIFYPEER, false);
+
+        curl_setopt($handle, CURLOPT_HEADER, true);
+
+        curl_setopt($handle, CURLOPT_NOBODY, true);
+
+        curl_setopt($handle, CURLOPT_USERAGENT, true);
+
+        $headers = curl_exec($handle);
+
+        curl_close($handle);
+
+        if (!empty($headers)){
+
+            $exists = true;
+
+            $headers = explode(PHP_EOL, $headers);
+
+            foreach($failCodeList as $code){
+
+                if (is_numeric($code) and strpos($headers[0], strval($code)) !== false){
+
+                    $exists = false;
+
+                    break;  
+                }
+            }
+        }
+
+        return $exists;
+    }
+
+}
+
+$wpmake = new WPMake( $argv, $default_config );
