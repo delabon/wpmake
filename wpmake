@@ -37,7 +37,8 @@ class WPMake {
     const WP_DOWNLOAD_URL = 'https://wordpress.org/';
     const PLUGIN_DOWNLOAD_URL = 'https://downloads.wordpress.org/plugin/';
     const API_PLUGIN_ENDPOINT = 'https://api.wordpress.org/plugins/info/1.0/{slug}.json';
-    const TEMP_FOLDER = __DIR__ . '/.wpmake_files';
+    const CACHE_FOLDER = __DIR__ . '/.wpmake_files';
+    const TEMP_FOLDER = '/tmp/wpmake';
 
     private $db;
     private $config;
@@ -115,9 +116,9 @@ class WPMake {
      */
     function setup(){
 
-        if( file_exists( self::TEMP_FOLDER ) ) return;
+        if( file_exists( self::CACHE_FOLDER ) ) return;
 
-        mkdir( self::TEMP_FOLDER );
+        mkdir( self::CACHE_FOLDER );
     }
 
     /**
@@ -175,7 +176,9 @@ class WPMake {
 
         $this->download_wp();
         $this->create_database();
-        //$this->download_plugins();
+        $this->download_plugins();
+
+        print "\n[success] {$this->config->url}\n";
     }
 
     /**
@@ -284,13 +287,10 @@ class WPMake {
      */
     function download_wp(){
 
-        $zip_file = self::TEMP_FOLDER . "/wordpress-{$this->config->wp_version}.zip";
-
-        if( ! file_exists( $zip_file ) ){
-            $this->download_zip( $this->wp_zip_url, $zip_file );
-        }
-
-        $this->extract_zip( $zip_file, $this->config->path );
+        $zip_file = self::CACHE_FOLDER . "/wordpress-{$this->config->wp_version}.zip";
+        
+        $this->download_zip( $this->wp_zip_url, $zip_file );
+        $this->extract_wp_zip( $zip_file, $this->config->path );
         $this->prepare_wp_config_file();
     }
 
@@ -302,6 +302,8 @@ class WPMake {
      * @return void
      */
     function download_zip( string $url, string $path ){
+
+        if( file_exists( $path ) ) return;
 
         print "\n[downloading] " . $url . "\n";
 
@@ -332,17 +334,16 @@ class WPMake {
     }
 
     /**
-     * Extract zip file to a folder
+     * Extract wordpress zip file to a folder
      *
      * @param string $zip_file
      * @param string $path
      * @return void
      */
-    function extract_zip( string $zip_file, string $path ){
+    function extract_wp_zip( string $zip_file, string $path ){
 
         print "\n[extracting] " . $zip_file . " > " . $path . "\n";
 
-        $source = '/tmp/wpmake_wp';
         $zip = new ZipArchive;
 
         if( $zip->open($zip_file) !== true ){
@@ -351,15 +352,15 @@ class WPMake {
             die;
         } 
         
-        $zip->extractTo($source);
+        $zip->extractTo( self::TEMP_FOLDER );
         $zip->close();
 
         // move wordpress to path
         mkdir( $path );
-        rename( $source . '/wordpress', $path );
+        rename( self::TEMP_FOLDER . '/wordpress', $path );
 
-        // remove empty folder /tmp/wpmake_wp
-        rmdir( $source );
+        // remove temp folder
+        rmdir( self::TEMP_FOLDER );
     }
 
     /**
@@ -378,6 +379,56 @@ class WPMake {
         $content = str_replace("WP_DEBUG', false", "WP_DEBUG', " . ( $this->config->wp_debug ? 'true' : 'false' ), $content);
 
         file_put_contents( $this->config->path . '/wp-config.php', $content );
+    }
+
+    /**
+     * Download plugins
+     *
+     * @return void
+     */
+    function download_plugins(){
+
+        foreach( $this->plugins as $plugin ){
+
+            $plugin = (object)$plugin;
+
+            $zip_file = self::CACHE_FOLDER . "/{$plugin->slug}-{$plugin->version}.zip";
+
+            $this->download_zip( $plugin->url, $zip_file );
+            $this->extract_plugin_zip( $zip_file, $this->config->path . '/wp-content/plugins/' . $plugin->slug );
+        }
+
+    }
+
+    /**
+     * Extract plugin zip file to a folder
+     *
+     * @param string $zip_file
+     * @param string $path
+     * @return void
+     */
+    function extract_plugin_zip( string $zip_file, string $path ){
+
+        print "\n[extracting] " . $zip_file . " > " . $path . "\n";
+
+        $zip = new ZipArchive;
+
+        if( $zip->open($zip_file) !== true ){
+            echo "\n[error] :- Unable to open the Zip File: {$zip_file}\n";
+            $zip->close();
+            die;
+        } 
+        
+        $zip->extractTo(self::TEMP_FOLDER);
+        $zip->close();
+
+        // move file to path
+        mkdir( $path );
+        $files = scandir(self::TEMP_FOLDER);
+        rename( self::TEMP_FOLDER . '/' . $files[2], $path );
+
+        // delete temp folder
+        rmdir( self::TEMP_FOLDER );
     }
 
     /**
